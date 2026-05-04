@@ -6,7 +6,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import * as ShogiModule from 'shogi.js';
 import confetti from 'canvas-confetti';
-import { Trophy, RotateCcw, ChevronLeft, ChevronRight, Info, AlertCircle, Upload, Plus, Loader2, Edit2, Check, ArrowUp, ArrowDown, Trash2, ListOrdered, Copy, ClipboardCopy } from 'lucide-react';
+import { Trophy, RotateCcw, ChevronLeft, ChevronRight, Info, AlertCircle, Upload, Plus, Loader2, Edit2, Check, ArrowUp, ArrowDown, Trash2, ListOrdered, Copy, ClipboardCopy, Download } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from '@google/genai';
 import { solveTsumeShogi, Move as SolverMove } from './lib/solver';
@@ -473,6 +473,7 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const [isEditMode, setIsEditMode] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<{ message: string, onConfirm: () => void } | null>(null);
   const [alertDialog, setAlertDialog] = useState<string | null>(null);
@@ -691,6 +692,35 @@ export default function App() {
     } catch (err) {
       setAlertDialog('クリップボードへのコピーに失敗しました。');
     }
+  };
+
+  const handleJsonImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0].id !== 'undefined') {
+          setConfirmDialog({
+            message: 'JSONデータをインポートしますか？現在のデータはすべて上書きされます。',
+            onConfirm: () => {
+              setProblems(parsed);
+              setCurrentProblemIndex(0);
+              setAlertDialog('データをインポートしました。');
+            }
+          });
+        } else {
+          setUploadError('無効なJSONデータです。正しい形式の問題データを含めてください。');
+        }
+      } catch(err) {
+        setUploadError('JSONデータの読み込みに失敗しました。ファイルが破損している可能性があります。');
+      }
+      if (jsonFileInputRef.current) jsonFileInputRef.current.value = '';
+    };
+    reader.readAsText(file);
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1322,22 +1352,6 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
               <ChevronRight />
             </button>
           </div>
-          {problems.length > INITIAL_PROBLEMS.length && (
-            <button
-              onClick={() => {
-                setConfirmDialog({
-                  message: '追加した問題をすべて削除して初期状態に戻しますか？',
-                  onConfirm: () => {
-                    setProblems(INITIAL_PROBLEMS);
-                    setCurrentProblemIndex(0);
-                  }
-                });
-              }}
-              className="text-xs text-red-600 hover:text-red-800 underline"
-            >
-              初期化
-            </button>
-          )}
         </div>
       </header>
 
@@ -1554,13 +1568,52 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
               <span className="font-bold text-sm">問題を追加・エクスポートする</span>
             </div>
             
-            <button
-              onClick={copyAllData}
-              className="flex items-center gap-2 text-sm text-amber-700 hover:text-amber-900 bg-white px-3 py-1.5 rounded-md border border-amber-300 shadow-sm transition-colors"
-            >
-              <ClipboardCopy size={16} />
-              データをコピー
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={copyAllData}
+                className="flex items-center gap-2 text-sm text-amber-700 hover:text-amber-900 bg-white px-3 py-1.5 rounded-md border border-amber-300 shadow-sm transition-colors"
+                title="現在の問題データをクリップボードにコピー"
+              >
+                <ClipboardCopy size={16} />
+                データをコピー
+              </button>
+
+              <input
+                type="file"
+                accept="application/json"
+                className="hidden"
+                ref={jsonFileInputRef}
+                onChange={handleJsonImport}
+              />
+              <button
+                onClick={() => jsonFileInputRef.current?.click()}
+                className="flex items-center gap-2 text-sm text-amber-700 hover:text-amber-900 bg-white px-3 py-1.5 rounded-md border border-amber-300 shadow-sm transition-colors"
+                title="JSONファイルから問題データをインポート"
+              >
+                <Download size={16} />
+                データをインポート
+              </button>
+
+              {problems.length > INITIAL_PROBLEMS.length && (
+                <button
+                  onClick={() => {
+                    setConfirmDialog({
+                      message: '追加した問題をすべて削除して初期状態に戻しますか？',
+                      onConfirm: () => {
+                        setProblems(INITIAL_PROBLEMS);
+                        setCurrentProblemIndex(0);
+                        setAlertDialog('データを初期状態に戻しました。');
+                      }
+                    });
+                  }}
+                  className="flex items-center gap-2 text-sm text-red-700 hover:text-red-900 bg-red-50 px-3 py-1.5 rounded-md border border-red-200 shadow-sm transition-colors"
+                  title="追加した問題などをすべて削除して初期状態に戻す"
+                >
+                  <RotateCcw size={16} />
+                  初期化
+                </button>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-4 w-full sm:w-auto">
             <button
