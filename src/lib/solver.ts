@@ -242,7 +242,8 @@ export function solveTsumeShogi(sfen: string, maxDepth: number): Move[] | null {
                     }
 
                     // Look for 1-move mate by Sente
-                    const checkSenteMate = () => {
+                    const countSenteMates = () => {
+                        let mateCount = 0;
                         const s2 = shogi.toSFENString ? shogi.toSFENString(1) : shogi.toSFEN(1);
                         const sMoves: any[] = [];
                         for (let x = 1; x <= 9; x++) {
@@ -262,8 +263,17 @@ export function solveTsumeShogi(sfen: string, maxDepth: number): Move[] | null {
 
                         for (const sm of sMoves) {
                             try {
-                                if (sm.from) shogi.move(sm.from.x, sm.from.y, sm.to.x, sm.to.y, sm.promote);
-                                else shogi.drop(sm.to.x, sm.to.y, sm.piece);
+                                if (sm.from) {
+                                    // Handle promote appropriately inside the loop to avoid invalid moves
+                                    try {
+                                        shogi.move(sm.from.x, sm.from.y, sm.to.x, sm.to.y, sm.promote);
+                                    } catch(e) { continue; }
+                                }
+                                else {
+                                    try {
+                                        shogi.drop(sm.to.x, sm.to.y, sm.piece);
+                                    } catch(e) { continue; }
+                                }
                                 
                                 if (shogi.isCheck(Color.White)) {
                                     // Check if White has ANY legal moves left
@@ -278,8 +288,10 @@ export function solveTsumeShogi(sfen: string, maxDepth: number): Move[] | null {
                                                     try {
                                                         shogi.move(x, y, wm.to.x, wm.to.y, wm.promote);
                                                         if (!shogi.isCheck(Color.White)) hasLegal = true;
+                                                    } catch (e) {
                                                     } finally {
-                                                        shogi.initializeFromSFENString(s3);
+                                                        if (shogi.initializeFromSFENString) shogi.initializeFromSFENString(s3);
+                                                        else shogi.initializeFromSFEN(s3);
                                                     }
                                                     if (hasLegal) break;
                                                 }
@@ -296,26 +308,31 @@ export function solveTsumeShogi(sfen: string, maxDepth: number): Move[] | null {
                                                         try {
                                                             shogi.drop(x, y, d.kind);
                                                             if (!shogi.isCheck(Color.White)) hasLegal = true;
+                                                        } catch(e) {
                                                         } finally {
-                                                            shogi.initializeFromSFENString(s3);
+                                                            if (shogi.initializeFromSFENString) shogi.initializeFromSFENString(s3);
+                                                            else shogi.initializeFromSFEN(s3);
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    if (!hasLegal) return true; // Found a mate-in-1 move for Sente
+                                    if (!hasLegal) mateCount++; // Found a mate-in-1 move for Sente
                                 }
+                            } catch(e) {
                             } finally {
-                                shogi.initializeFromSFENString(s2);
+                                if (shogi.initializeFromSFENString) shogi.initializeFromSFENString(s2);
+                                else shogi.initializeFromSFEN(s2);
                             }
                         }
-                        return false;
+                        return mateCount;
                     };
 
-                    if (checkSenteMate()) {
-                        score -= 200; // Found a mate-in-1 for Sente after this move
-                        if (isKingMove) score -= 100; // Double penalty for escaping into mate
+                    const mates = countSenteMates();
+                    if (mates > 0) {
+                        score -= 200 * mates; // Found mate-in-1 for Sente after this move
+                        if (isKingMove) score -= 100 * mates; // Penalty for escaping into mate
                     }
 
                 } finally {

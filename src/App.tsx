@@ -220,14 +220,14 @@ const getLegalMoves = (currentShogi: any, color: Color): Move[] => {
   return legalMoves;
 };
 
-const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistoryMap: Record<string, Move>): { bestMove: Move | null, steps: number, mate: boolean } => {
-  const memo = new Map<string, { steps: number, mate: boolean, bestMove: Move | null }>();
+const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistoryMap: Record<string, Move>): { bestMove: Move | null, steps: number, mate: boolean, mateCount?: number } => {
+  const memo = new Map<string, { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number }>();
   const startTime = Date.now();
   const TIME_LIMIT_MS = 2500;
 
-  function search(depth: number, isBlack: boolean): { steps: number, mate: boolean, bestMove: Move | null } {
+  function search(depth: number, isBlack: boolean): { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number } {
     if (Date.now() - startTime > TIME_LIMIT_MS) {
-      return { steps: 0, mate: false, bestMove: null };
+      return { steps: 0, mate: false, bestMove: null, mateCount: 0 };
     }
 
     const sfen = currentShogi.toSFENString(1);
@@ -235,7 +235,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
     if (memo.has(hash)) return memo.get(hash)!;
 
     if (depth === 0) {
-      return { steps: 0, mate: false, bestMove: null };
+      return { steps: 0, mate: false, bestMove: null, mateCount: 0 };
     }
 
     const color = isBlack ? Color.Black : Color.White;
@@ -256,7 +256,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
       });
 
       if (legalMoves.length === 0) {
-        const res = { steps: 0, mate: false, bestMove: null };
+        const res = { steps: 0, mate: false, bestMove: null, mateCount: 0 };
         memo.set(hash, res);
         return res;
       }
@@ -264,6 +264,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
       let bestSteps = Infinity;
       let bestMove: Move | null = null;
       let evaluatedBlackMoves = 0;
+      let mateCount = 0;
 
       for (const move of legalMoves) {
         if (Date.now() - startTime > TIME_LIMIT_MS && evaluatedBlackMoves > 0) break;
@@ -296,11 +297,14 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
           if (res.steps < bestSteps) {
             bestSteps = res.steps;
             bestMove = move;
+            mateCount = 1;
+          } else if (res.steps === bestSteps) {
+            mateCount++;
           }
         }
       }
 
-      const finalRes = bestMove ? { steps: bestSteps + 1, mate: true, bestMove } : { steps: 0, mate: false, bestMove: null };
+      const finalRes = bestMove ? { steps: bestSteps + 1, mate: true, bestMove, mateCount } : { steps: 0, mate: false, bestMove: null, mateCount: 0 };
       memo.set(hash, finalRes);
       return finalRes;
 
@@ -312,6 +316,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
       }
 
       let maxSteps = -1;
+      let minMateCount = Infinity;
       let bestMoves: Move[] = [];
       let escapeMoves: Move[] = [];
 
@@ -330,11 +335,18 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
         if (!res.mate) {
           escapeMoves.push(move);
         } else {
+          const currentMateCount = res.mateCount || Infinity;
           if (res.steps > maxSteps) {
             maxSteps = res.steps;
+            minMateCount = currentMateCount;
             bestMoves = [move];
           } else if (res.steps === maxSteps) {
-            bestMoves.push(move);
+            if (currentMateCount < minMateCount) {
+              minMateCount = currentMateCount;
+              bestMoves = [move];
+            } else if (currentMateCount === minMateCount) {
+              bestMoves.push(move);
+            }
           }
         }
       }
@@ -395,16 +407,57 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
         const sfenKey = currentShogi.toSFENString(1);
         const previousMove = aiMoveHistoryMap[sfenKey];
         
-        const alternativeMoves = bestMoves.filter(m => 
-          !previousMove || 
-          !(m.from?.x === previousMove.from?.x && m.from?.y === previousMove.from?.y && m.to.x === previousMove.to.x && m.to.y === previousMove.to.y && m.piece === previousMove.piece && m.promote === previousMove.promote)
-        );
-
-        if (alternativeMoves.length > 0) {
-          randomBest = alternativeMoves[Math.floor(Math.random() * alternativeMoves.length)];
-        } else {
-          randomBest = bestMoves[Math.floor(Math.random() * bestMoves.length)];
+        // When bestMoves lead to mate, evaluate which doomed move is best (e.g. drop near King, capture, etc.)
+        let bestDoomedMove = bestMoves[0];
+        let bestDoomedScore = -Infinity;
+        const PIECE_VALUES: Record<string, number> = {
+          FU: 1, KY: 3, KE: 4, GI: 6, KI: 7, KA: 10, HI: 12,
+          TO: 7, NY: 7, NK: 7, NG: 7, UM: 12, RY: 14, OU: 1000
+        };
+        let goteKingPos = { x: 5, y: 1 };
+        for (let x = 1; x <= 9; x++) {
+          for (let y = 1; y <= 9; y++) {
+            const p = currentShogi.board[x - 1][y - 1];
+            if (p && p.kind === 'OU' && p.color === Color.White) {
+              goteKingPos = { x, y };
+            }
+          }
         }
+
+        const evaluateDoomedMove = (m: Move) => {
+           let score = 0;
+           if (m.from) {
+               const captured = currentShogi.get(m.to.x, m.to.y);
+               if (captured) {
+                  score += (PIECE_VALUES[captured.kind] || 1) * 20;
+               }
+               const p = currentShogi.get(m.from.x, m.from.y);
+               if (p && ['KI', 'GI', 'FU', 'KA', 'HI'].includes(p.kind)) {
+                   const distBefore = Math.abs(m.from.x - goteKingPos.x) + Math.abs(m.from.y - goteKingPos.y);
+                   const distAfter = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
+                   if (distAfter < distBefore) score += 15;
+               }
+           } else {
+               score -= 10; // Penalty for dropping a piece
+               if (['KI', 'GI', 'FU'].includes(m.piece!)) {
+                   const dist = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
+                   if (dist <= 2) score += 30; // Strongly prefer dropping near King
+               }
+           }
+           if (previousMove && m.from?.x === previousMove.from?.x && m.from?.y === previousMove.from?.y && m.to.x === previousMove.to.x && m.to.y === previousMove.to.y && m.piece === previousMove.piece && m.promote === previousMove.promote) {
+             score -= 100;
+           }
+           return score + Math.random();
+        };
+
+        for (const m of bestMoves) {
+           const score = evaluateDoomedMove(m);
+           if (score > bestDoomedScore) {
+               bestDoomedScore = score;
+               bestDoomedMove = m;
+           }
+        }
+        randomBest = bestDoomedMove;
       }
 
       const finalRes = { steps: maxSteps + 1, mate: true, bestMove: randomBest };
@@ -423,18 +476,36 @@ export default function App() {
 
   useEffect(() => {
     const fetchSettings = async () => {
+      const localTitle = localStorage.getItem('tsumeShogiAppTitle');
+      let apiTitle: string | null = null;
       try {
         const res = await fetch('/api/settings');
         if (res.ok) {
           const data = await res.json();
           if (data.title) {
-            setAppTitle(data.title);
+            apiTitle = data.title;
           }
         }
       } catch (e) {
         console.error("Failed to fetch settings from API", e);
-        const localTitle = localStorage.getItem('tsumeShogiAppTitle');
-        if (localTitle) setAppTitle(localTitle);
+      }
+
+      const isApiDefault = apiTitle === settingsData.title;
+      
+      if (apiTitle && !isApiDefault) {
+        setAppTitle(apiTitle);
+        localStorage.setItem('tsumeShogiAppTitle', apiTitle);
+      } else if (localTitle && localTitle !== settingsData.title) {
+        setAppTitle(localTitle);
+        fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: localTitle })
+        }).catch(() => {});
+      } else if (apiTitle) {
+        setAppTitle(apiTitle);
+      } else if (localTitle) {
+        setAppTitle(localTitle);
       }
     };
     fetchSettings();
@@ -506,23 +577,24 @@ export default function App() {
         }
       }
 
-      // Source of truth priority:
-      // 1. API Problems (Server)
-      // 2. Local Problems (if API is empty/fails)
-      // 3. Initial Problems (Fallback)
+      // Handling ephemeral Dev Server resets:
+      // If API returns default data, but we have local backup, restore local!
+      const isApiDefault = JSON.stringify(apiProblems) === JSON.stringify(INITIAL_PROBLEMS);
+      const hasLocalData = localProblems && localProblems.length > 0;
       
-      if (apiProblems && apiProblems.length > 0) {
+      if (apiProblems && apiProblems.length > 0 && !isApiDefault) {
         setProblems(apiProblems);
-        // Backup to local storage
         localStorage.setItem('tsumeShogiProblems', JSON.stringify(apiProblems));
-      } else if (localProblems && localProblems.length > 0) {
+      } else if (hasLocalData) {
         setProblems(localProblems);
-        // Sync to API
+        // Sync to API so server is updated again
         fetch('/api/problems', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(localProblems)
         }).catch(() => {});
+      } else if (apiProblems && apiProblems.length > 0) {
+        setProblems(apiProblems);
       } else {
         setProblems(INITIAL_PROBLEMS);
       }
@@ -1594,14 +1666,15 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
                 データをインポート
               </button>
 
-              {problems.length > INITIAL_PROBLEMS.length && (
+              {JSON.stringify(problems) !== JSON.stringify(INITIAL_PROBLEMS) && (
                 <button
                   onClick={() => {
                     setConfirmDialog({
-                      message: '追加した問題をすべて削除して初期状態に戻しますか？',
+                      message: '現在の変更を破棄して初期状態に戻しますか？',
                       onConfirm: () => {
                         setProblems(INITIAL_PROBLEMS);
                         setCurrentProblemIndex(0);
+                        localStorage.removeItem('tsumeShogiProblems');
                         setAlertDialog('データを初期状態に戻しました。');
                       }
                     });
