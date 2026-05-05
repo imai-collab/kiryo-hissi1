@@ -220,14 +220,14 @@ const getLegalMoves = (currentShogi: any, color: Color): Move[] => {
   return legalMoves;
 };
 
-const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistoryMap: Record<string, Move>): { bestMove: Move | null, steps: number, mate: boolean, mateCount?: number } => {
-  const memo = new Map<string, { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number }>();
+const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistoryMap: Record<string, Move>): { bestMove: Move | null, steps: number, mate: boolean, mateCount?: number, timeout?: boolean } => {
+  const memo = new Map<string, { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number, timeout?: boolean }>();
   const startTime = Date.now();
-  const TIME_LIMIT_MS = 2500;
+  const TIME_LIMIT_MS = 3000;
 
-  function search(depth: number, isBlack: boolean): { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number } {
+  function search(depth: number, isBlack: boolean): { steps: number, mate: boolean, bestMove: Move | null, mateCount?: number, timeout?: boolean } {
     if (Date.now() - startTime > TIME_LIMIT_MS) {
-      return { steps: 0, mate: false, bestMove: null, mateCount: 0 };
+      return { steps: 0, mate: false, bestMove: null, mateCount: 0, timeout: true };
     }
 
     const sfen = currentShogi.toSFENString(1);
@@ -240,6 +240,63 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
 
     const color = isBlack ? Color.Black : Color.White;
     let legalMoves = getLegalMoves(currentShogi, color);
+
+    // Sort moves to evaluate promising moves first, avoiding timeout with obscure moves
+    const PIECE_VALUES: Record<string, number> = {
+      FU: 1, KY: 3, KE: 4, GI: 6, KI: 7, KA: 10, HI: 12,
+      TO: 7, NY: 7, NK: 7, NG: 7, UM: 12, RY: 14, OU: 1000
+    };
+    let goteKingPos = { x: 5, y: 1 };
+    let senteKingPos = { x: 5, y: 9 };
+    for (let x = 1; x <= 9; x++) {
+      for (let y = 1; y <= 9; y++) {
+        const p = currentShogi.get(x, y);
+        if (p && p.kind === 'OU') {
+          if (p.color === Color.White) goteKingPos = { x, y };
+          else senteKingPos = { x, y };
+        }
+      }
+    }
+
+    const enemyKingPos = isBlack ? goteKingPos : senteKingPos;
+    const myKingPos = isBlack ? senteKingPos : goteKingPos;
+
+    legalMoves.sort((a, b) => {
+      const scoreMove = (m: Move) => {
+        let score = 0;
+        if (m.from) {
+          const captured = currentShogi.get(m.to.x, m.to.y);
+          if (captured) score += (PIECE_VALUES[captured.kind] || 1) * 20; // Captures are good
+          if (m.promote) score += 10;
+          
+          const piece = currentShogi.get(m.from.x, m.from.y);
+          if (piece && !isBlack) {
+            // Defense scaling
+            const distBefore = Math.abs(m.from.x - myKingPos.x) + Math.abs(m.from.y - myKingPos.y);
+            const distAfter = Math.abs(m.to.x - myKingPos.x) + Math.abs(m.to.y - myKingPos.y);
+            if (distAfter < distBefore) score += 5; // Moving closer to own king
+          } else if (piece && isBlack) {
+             const distBefore = Math.abs(m.from.x - enemyKingPos.x) + Math.abs(m.from.y - enemyKingPos.y);
+             const distAfter = Math.abs(m.to.x - enemyKingPos.x) + Math.abs(m.to.y - enemyKingPos.y);
+             if (distAfter < distBefore) score += 5;
+          }
+        } else {
+          // Drops
+          score -= 10; // Penalty for using hand piece usually
+          const dropVal = PIECE_VALUES[m.piece!] || 1;
+          score += dropVal;
+          if (!isBlack) {
+             const dist = Math.abs(m.to.x - myKingPos.x) + Math.abs(m.to.y - myKingPos.y);
+             if (dist <= 2) score += 15; // Defending near king
+          } else {
+             const dist = Math.abs(m.to.x - enemyKingPos.x) + Math.abs(m.to.y - enemyKingPos.y);
+             if (dist <= 2) score += 15;
+          }
+        }
+        return score;
+      };
+      return scoreMove(b) - scoreMove(a);
+    });
 
     if (isBlack) {
       // 探索空間を減らすため、先手（プレイヤー）のシミュレーションは王手のみに絞る
@@ -266,8 +323,13 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
       let evaluatedBlackMoves = 0;
       let mateCount = 0;
 
+      let timeout = false;
+
       for (const move of legalMoves) {
-        if (Date.now() - startTime > TIME_LIMIT_MS && evaluatedBlackMoves > 0) break;
+        if (Date.now() - startTime > TIME_LIMIT_MS) {
+           timeout = true;
+           break;
+        }
         evaluatedBlackMoves++;
         
         if (move.piece === 'FU') {
@@ -293,6 +355,12 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
           currentShogi.initializeFromSFEN(s);
         }
 
+        // If the deeper search timed out, we might not have found a mate, but it doesn't mean it's not mate.
+        if (res.timeout) {
+            timeout = true;
+            break;
+        }
+
         if (res.mate) {
           if (res.steps < bestSteps) {
             bestSteps = res.steps;
@@ -304,7 +372,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
         }
       }
 
-      const finalRes = bestMove ? { steps: bestSteps + 1, mate: true, bestMove, mateCount } : { steps: 0, mate: false, bestMove: null, mateCount: 0 };
+      const finalRes = bestMove ? { steps: bestSteps + 1, mate: true, bestMove, mateCount, timeout } : { steps: 0, mate: false, bestMove: null, mateCount: 0, timeout };
       memo.set(hash, finalRes);
       return finalRes;
 
@@ -320,8 +388,13 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
       let bestMoves: Move[] = [];
       let escapeMoves: Move[] = [];
 
+      let timeout = false;
+
       for (const move of legalMoves) {
-        if (Date.now() - startTime > TIME_LIMIT_MS && (escapeMoves.length > 0 || bestMoves.length > 0)) break;
+        if (Date.now() - startTime > TIME_LIMIT_MS) {
+            timeout = true;
+            break;
+        }
 
         const s = currentShogi.toSFENString(1);
         applyMoveToShogi(currentShogi, move);
@@ -330,6 +403,12 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
           currentShogi.initializeFromSFENString(s);
         } else {
           currentShogi.initializeFromSFEN(s);
+        }
+
+        if (res.timeout) {
+           timeout = true;
+           if (!res.mate) escapeMoves.push(move);
+           break;
         }
 
         if (!res.mate) {
@@ -351,107 +430,74 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
         }
       }
 
+      const sfenKey = currentShogi.toSFENString(1);
+      const previousMove = aiMoveHistoryMap[sfenKey];
+
+      const PIECE_VALUES: Record<string, number> = {
+        FU: 1, KY: 3, KE: 4, GI: 6, KI: 7, KA: 10, HI: 12,
+        TO: 7, NY: 7, NK: 7, NG: 7, UM: 12, RY: 14, OU: 1000
+      };
+
+      let goteKingPos = { x: 5, y: 1 };
+      for (let x = 1; x <= 9; x++) {
+        for (let y = 1; y <= 9; y++) {
+          const p = currentShogi.get(x, y);
+          if (p && p.kind === 'OU' && p.color === Color.White) {
+            goteKingPos = { x, y };
+          }
+        }
+      }
+
+      const evaluateMoveOption = (m: Move) => {
+         let score = 0;
+         if (m.from) {
+             const captured = currentShogi.get(m.to.x, m.to.y);
+             if (captured) {
+                score += (PIECE_VALUES[captured.kind] || 1) * 20;
+             }
+             const p = currentShogi.get(m.from.x, m.from.y);
+             if (p && ['KI', 'GI', 'FU', 'KA', 'HI'].includes(p.kind)) {
+                 const distBefore = Math.abs(m.from.x - goteKingPos.x) + Math.abs(m.from.y - goteKingPos.y);
+                 const distAfter = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
+                 if (distAfter < distBefore) score += 15;
+             }
+             if (p && p.kind === 'OU') score += 10; // slightly prefer king moving away from danger
+         } else {
+             score -= 10; // Penalty for dropping a piece
+             const dist = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
+             if (dist <= 2) score += 30; // Strongly prefer dropping near King
+         }
+         // Prevent repeating the same move immediately
+         if (previousMove && m.from?.x === previousMove.from?.x && m.from?.y === previousMove.from?.y && m.to.x === previousMove.to.x && m.to.y === previousMove.to.y && m.piece === previousMove.piece && m.promote === previousMove.promote) {
+           score -= 100;
+         }
+         return score + Math.random();
+      };
+
       if (escapeMoves.length > 0) {
         let bestEscape = escapeMoves[0];
         let bestScore = -Infinity;
-        const sfenKey = currentShogi.toSFENString(1);
-        const previousMove = aiMoveHistoryMap[sfenKey];
-        
-        const PIECE_VALUES: Record<string, number> = {
-          FU: 1, KY: 3, KE: 4, GI: 6, KI: 7, KA: 10, HI: 12,
-          TO: 7, NY: 7, NK: 7, NG: 7, UM: 12, RY: 14, OU: 1000
-        };
 
         for (const m of escapeMoves) {
-          let score = 0;
-          
-          if (m.from) {
-            const captured = currentShogi.get(m.to.x, m.to.y);
-            if (captured) {
-              score += (PIECE_VALUES[captured.kind] || 1) * 10;
-            }
-          }
-          // 玉を逃がす手はプラス評価
-          if (m.from) {
-            const p = currentShogi.get(m.from.x, m.from.y);
-            if (p && p.kind === 'OU') {
-              score += 5;
-            }
-          }
-          // 持ち駒を打つ手はマイナス評価（無駄合いを避ける）
-          if (m.piece) {
-            score -= 5;
-          }
-          
-          // 前回と同じ手はマイナス評価（別の手を優先）
-          if (previousMove && m.from?.x === previousMove.from?.x && m.from?.y === previousMove.from?.y && m.to.x === previousMove.to.x && m.to.y === previousMove.to.y && m.piece === previousMove.piece && m.promote === previousMove.promote) {
-            score -= 100;
-          }
-
-          // ランダム性を少し加えて毎回同じ手にならないようにする
-          score += Math.random();
-
+          const score = evaluateMoveOption(m);
           if (score > bestScore) {
             bestScore = score;
             bestEscape = m;
           }
         }
 
-        const escapeRes = { steps: 0, mate: false, bestMove: bestEscape };
+        const escapeRes = { steps: 0, mate: false, bestMove: bestEscape, timeout };
         memo.set(hash, escapeRes);
         return escapeRes;
       }
 
       let randomBest = null;
       if (bestMoves.length > 0) {
-        const sfenKey = currentShogi.toSFENString(1);
-        const previousMove = aiMoveHistoryMap[sfenKey];
-        
-        // When bestMoves lead to mate, evaluate which doomed move is best (e.g. drop near King, capture, etc.)
         let bestDoomedMove = bestMoves[0];
         let bestDoomedScore = -Infinity;
-        const PIECE_VALUES: Record<string, number> = {
-          FU: 1, KY: 3, KE: 4, GI: 6, KI: 7, KA: 10, HI: 12,
-          TO: 7, NY: 7, NK: 7, NG: 7, UM: 12, RY: 14, OU: 1000
-        };
-        let goteKingPos = { x: 5, y: 1 };
-        for (let x = 1; x <= 9; x++) {
-          for (let y = 1; y <= 9; y++) {
-            const p = currentShogi.board[x - 1][y - 1];
-            if (p && p.kind === 'OU' && p.color === Color.White) {
-              goteKingPos = { x, y };
-            }
-          }
-        }
-
-        const evaluateDoomedMove = (m: Move) => {
-           let score = 0;
-           if (m.from) {
-               const captured = currentShogi.get(m.to.x, m.to.y);
-               if (captured) {
-                  score += (PIECE_VALUES[captured.kind] || 1) * 20;
-               }
-               const p = currentShogi.get(m.from.x, m.from.y);
-               if (p && ['KI', 'GI', 'FU', 'KA', 'HI'].includes(p.kind)) {
-                   const distBefore = Math.abs(m.from.x - goteKingPos.x) + Math.abs(m.from.y - goteKingPos.y);
-                   const distAfter = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
-                   if (distAfter < distBefore) score += 15;
-               }
-           } else {
-               score -= 10; // Penalty for dropping a piece
-               if (['KI', 'GI', 'FU'].includes(m.piece!)) {
-                   const dist = Math.abs(m.to.x - goteKingPos.x) + Math.abs(m.to.y - goteKingPos.y);
-                   if (dist <= 2) score += 30; // Strongly prefer dropping near King
-               }
-           }
-           if (previousMove && m.from?.x === previousMove.from?.x && m.from?.y === previousMove.from?.y && m.to.x === previousMove.to.x && m.to.y === previousMove.to.y && m.piece === previousMove.piece && m.promote === previousMove.promote) {
-             score -= 100;
-           }
-           return score + Math.random();
-        };
 
         for (const m of bestMoves) {
-           const score = evaluateDoomedMove(m);
+           const score = evaluateMoveOption(m);
            if (score > bestDoomedScore) {
                bestDoomedScore = score;
                bestDoomedMove = m;
@@ -460,7 +506,7 @@ const findBestDefenderMove = (currentShogi: any, maxDepth: number, aiMoveHistory
         randomBest = bestDoomedMove;
       }
 
-      const finalRes = { steps: maxSteps + 1, mate: true, bestMove: randomBest };
+      const finalRes = { steps: maxSteps + 1, mate: true, bestMove: randomBest, timeout };
       memo.set(hash, finalRes);
       return finalRes;
     }
@@ -535,6 +581,7 @@ export default function App() {
   const [message, setMessage] = useState<string>('あなたの番です。');
   const [isGameOver, setIsGameOver] = useState(false);
   const [moveHistory, setMoveHistory] = useState<Move[]>([]);
+  const [isGoteManualEntry, setIsGoteManualEntry] = useState(false);
   const [showInfo, setShowInfo] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingPromotionMove, setPendingPromotionMove] = useState<Move | null>(null);
@@ -945,6 +992,7 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
       setSelectedHandPiece(null);
       setMessage('あなたの番です。');
       setIsGameOver(false);
+      setIsGoteManualEntry(false);
       setMoveHistory([]);
       setError(null);
       setPendingPromotionMove(null);
@@ -954,6 +1002,37 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
       setError("ゲームの初期化に失敗しました。");
     }
   }, [currentProblem]);
+
+  const handleChangeGoteMove = useCallback(() => {
+    if (moveHistory.length === 0) return;
+    const isSentesTurn = moveHistory.length % 2 === 0;
+    
+    if (!isSentesTurn) return;
+
+    const newMoveHistory = [...moveHistory];
+    const newSfenHistory = [...sfenHistory];
+    
+    newMoveHistory.pop();
+    newSfenHistory.pop();
+
+    const newShogi = new Shogi();
+    if (newShogi.initializeFromSFENString) {
+      newShogi.initializeFromSFENString(newSfenHistory[newSfenHistory.length - 1]);
+    } else {
+      newShogi.initializeFromSFEN(newSfenHistory[newSfenHistory.length - 1]);
+    }
+    
+    setSfenHistory(newSfenHistory);
+    setMoveHistory(newMoveHistory);
+    setShogi(newShogi);
+    
+    setIsGoteManualEntry(true);
+    setIsGameOver(false);
+    setMessage('後手の手を入力してください。');
+    setSelectedSquare(null);
+    setSelectedHandPiece(null);
+    setPendingPromotionMove(null);
+  }, [moveHistory, sfenHistory]);
 
   useEffect(() => {
     resetGame();
@@ -1096,24 +1175,29 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
       }
     } else {
       // Select a piece on the board
+      const turnColor = isGoteManualEntry ? Color.White : Color.Black;
       const piece = shogi.get(x, y);
-      if (piece && piece.color === Color.Black) {
+      if (piece && piece.color === turnColor) {
         setSelectedSquare({ x, y });
       }
     }
   };
 
   const handleHandClick = (piece: string, color: Color) => {
-    if (isGameOver || color !== Color.Black || message === '相手が考えています...') return;
+    const turnColor = isGoteManualEntry ? Color.White : Color.Black;
+    if (isGameOver || color !== turnColor || message === '相手が考えています...') return;
     setSelectedSquare(null);
     setSelectedHandPiece({ piece, color });
   };
 
   const processMove = (move: Move) => {
+    const turnColor = isGoteManualEntry ? Color.White : Color.Black;
+    const opponentColor = isGoteManualEntry ? Color.Black : Color.White;
+
     setPendingPromotionMove(null);
     const sfenBefore = shogi.toSFENString(1);
 
-    const legalMoves = getLegalMoves(shogi, Color.Black);
+    const legalMoves = getLegalMoves(shogi, turnColor);
     const isLegal = legalMoves.some(m => 
       m.from?.x === move.from?.x && m.from?.y === move.from?.y &&
       m.to?.x === move.to.x && m.to?.y === move.to.y &&
@@ -1122,7 +1206,7 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
 
     if (!isLegal) {
       setMessage('その手は指せません（反則手です）。');
-      setTimeout(() => setMessage('あなたの番です。'), 1500);
+      setTimeout(() => setMessage(isGoteManualEntry ? '後手の手を入力してください。' : 'あなたの番です。'), 1500);
       return;
     }
 
@@ -1131,12 +1215,12 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
 
     applyMoveToShogi(shogi, move);
 
-    if (move.piece === 'FU' && shogi.isCheck(Color.White)) {
-      const whiteMoves = getLegalMoves(shogi, Color.White);
-      if (whiteMoves.length === 0) {
+    if (move.piece === 'FU' && shogi.isCheck(opponentColor)) {
+      const oppMoves = getLegalMoves(shogi, opponentColor);
+      if (oppMoves.length === 0) {
         shogi.initializeFromSFENString(sfenBefore);
         setMessage('打ち歩詰めは禁手です。');
-        setTimeout(() => setMessage('あなたの番です。'), 2000);
+        setTimeout(() => setMessage(isGoteManualEntry ? '後手の手を入力してください。' : 'あなたの番です。'), 2000);
         return;
       }
     }
@@ -1149,7 +1233,7 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
       setMoveHistory(prev => [...prev, move]);
       setShogi(cloneShogi(shogi));
       setIsGameOver(true);
-      setMessage('千日手です。攻め方の失敗となります。');
+      setMessage(isGoteManualEntry ? '千日手です。後手の失敗となります。' : '千日手です。攻め方の失敗となります。');
       return;
     }
 
@@ -1159,16 +1243,26 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
     const nextShogi = cloneShogi(shogi);
     setShogi(nextShogi);
 
-    const whiteMoves = getLegalMoves(nextShogi, Color.White);
-    if (whiteMoves.length === 0) {
+    const oppMoves = getLegalMoves(nextShogi, opponentColor);
+    if (oppMoves.length === 0) {
       setIsGameOver(true);
-      setMessage('詰みです！おめでとうございます！');
-      confetti({
-        particleCount: 150,
-        spread: 70,
-        origin: { y: 0.6 }
-      });
+      if (turnColor === Color.White) {
+        setMessage('指す手がありません。失敗です。');
+      } else {
+        setMessage('詰みです！おめでとうございます！');
+        confetti({
+          particleCount: 150,
+          spread: 70,
+          origin: { y: 0.6 }
+        });
+      }
       return;
+    }
+
+    if (isGoteManualEntry) {
+       setIsGoteManualEntry(false);
+       setMessage('あなたの番です。');
+       return;
     }
 
     setMessage('相手が考えています...');
@@ -1553,13 +1647,22 @@ SFEN形式の例: 7nl/1R3sk2/5pppp/9/9/9/9/9/9 b GS 1
                 </div>
               </div>
               
-              <button
-                onClick={resetGame}
-                className="w-full max-w-[260px] sm:max-w-[380px] md:max-w-[420px] flex items-center justify-center gap-2 bg-amber-800 text-white py-3 rounded-xl font-bold hover:bg-amber-900 transition-colors shadow-md active:scale-95"
-              >
-                <RotateCcw size={18} />
-                最初から
-              </button>
+              <div className="flex flex-row w-full max-w-[260px] sm:max-w-[380px] md:max-w-[420px] gap-2">
+                <button
+                  onClick={resetGame}
+                  className="flex-1 flex items-center justify-center gap-1 sm:gap-2 bg-amber-800 text-white py-2 sm:py-3 rounded-xl font-bold text-sm sm:text-base hover:bg-amber-900 transition-colors shadow-md active:scale-95"
+                >
+                  <RotateCcw size={16} className="sm:w-[18px] sm:h-[18px]" />
+                  最初から
+                </button>
+                <button
+                  onClick={handleChangeGoteMove}
+                  disabled={moveHistory.length === 0 || moveHistory.length % 2 !== 0}
+                  className={`flex-1 flex items-center justify-center bg-gray-600 text-white py-2 sm:py-3 rounded-xl font-bold text-sm sm:text-base transition-colors shadow-md active:scale-95 ${moveHistory.length === 0 || moveHistory.length % 2 !== 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+                >
+                  後手の手を変える
+                </button>
+              </div>
             </div>
 
             {/* Sente Hand (Right) */}
